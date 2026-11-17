@@ -6,16 +6,46 @@ const path = require("path");
 const fs = require("fs");
 
 const app = express();
-const PORT = 3000;
 
-// Exact Excel file location
-const EXCEL_FILE = path.join(__dirname, "orders.xlsx");
+// Render automatically provides PORT
+const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "../frontend")));
+// Excel storage location
+// Render Persistent Disk ke liye DATA_DIR=/var/data set karna
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const EXCEL_FILE = path.join(DATA_DIR, "orders.xlsx");
 
-// Prevent simultaneous Excel read/write operations
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// ---------- CORS CONFIGURATION ----------
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+    .split(",")
+    .map(origin => origin.trim())
+    .filter(Boolean);
+
+app.use(cors({
+    origin: (origin, callback) => {
+        // Allow requests without browser Origin (health checks, etc.)
+        if (!origin) return callback(null, true);
+
+        // Allow all origins until FRONTEND_URL is configured
+        if (allowedOrigins.length === 0) {
+            return callback(null, true);
+        }
+
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        return callback(new Error("Not allowed by CORS"));
+    }
+}));
+
+app.use(express.json({ limit: "1mb" }));
+
+// ---------- EXCEL SAVE QUEUE ----------
 let saveQueue = Promise.resolve();
 
 function queueSave(task) {
@@ -24,7 +54,7 @@ function queueSave(task) {
     return current;
 }
 
-// Retry when Excel file is temporarily locked
+// ---------- SAVE WORKBOOK ----------
 async function saveWorkbook(workbook, retries = 5) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -39,82 +69,14 @@ async function saveWorkbook(workbook, retries = 5) {
             }
 
             console.log(`Excel locked. Retry ${attempt}/${retries}`);
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            await new Promise(resolve =>
+                setTimeout(resolve, 1000 * attempt)
+            );
         }
     }
 }
 
-// Create or load Excel workbook
-async function getWorkbook() {
-    const workbook = new ExcelJS.Workbook();
-
-    if (fs.existsSync(EXCEL_FILE) && fs.statSync(EXCEL_FILE).size > 0) {
-        await workbook.xlsx.readFile(EXCEL_FILE);
-    }
-
-    let ordersSheet = workbook.getWorksheet("Orders");
-    let summarySheet = workbook.getWorksheet("Summary");
-
-    if (!ordersSheet) {
-        ordersSheet = workbook.addWorksheet("Orders");
-    }
-
-    if (!summarySheet) {
-        summarySheet = workbook.addWorksheet("Summary");
-    }
-
-    // Headers for Orders sheet
-    if (ordersSheet.rowCount === 0) {
-        ordersSheet.addRow([
-            "Order ID",
-            "Date & Time",
-            "Product Name",
-            "Category",
-            "Pack Size",
-            "Quantity",
-            "Price/Unit (₹)",
-            "Item Total (₹)",
-            "Order Total (₹)"
-        ]);
-
-        ordersSheet.columns = [
-            { width: 24 },
-            { width: 23 },
-            { width: 28 },
-            { width: 18 },
-            { width: 14 },
-            { width: 12 },
-            { width: 17 },
-            { width: 17 },
-            { width: 18 }
-        ];
-
-        styleHeader(ordersSheet);
-    }
-
-    // Headers for Summary sheet
-    if (summarySheet.rowCount === 0) {
-        summarySheet.addRow([
-            "Order ID",
-            "Date & Time",
-            "Items Count",
-            "Grand Total (₹)"
-        ]);
-
-        summarySheet.columns = [
-            { width: 25 },
-            { width: 23 },
-            { width: 16 },
-            { width: 20 }
-        ];
-
-        styleHeader(summarySheet);
-    }
-
-    return { workbook, ordersSheet, summarySheet };
-}
-
-// Style header
+// ---------- HEADER STYLE ----------
 function styleHeader(sheet) {
     const header = sheet.getRow(1);
 
@@ -147,11 +109,95 @@ function styleHeader(sheet) {
     });
 }
 
-// ==============================
-// POST /api/order
-// Save new order
-// ==============================
+// ---------- GET WORKBOOK ----------
+async function getWorkbook() {
+    const workbook = new ExcelJS.Workbook();
 
+    if (
+        fs.existsSync(EXCEL_FILE) &&
+        fs.statSync(EXCEL_FILE).size > 0
+    ) {
+        await workbook.xlsx.readFile(EXCEL_FILE);
+    }
+
+    let ordersSheet = workbook.getWorksheet("Orders");
+    let summarySheet = workbook.getWorksheet("Summary");
+
+    if (!ordersSheet) {
+        ordersSheet = workbook.addWorksheet("Orders");
+    }
+
+    if (!summarySheet) {
+        summarySheet = workbook.addWorksheet("Summary");
+    }
+
+    if (ordersSheet.rowCount === 0) {
+        ordersSheet.addRow([
+            "Order ID",
+            "Date & Time",
+            "Product Name",
+            "Category",
+            "Pack Size",
+            "Quantity",
+            "Price/Unit (₹)",
+            "Item Total (₹)",
+            "Order Total (₹)"
+        ]);
+
+        ordersSheet.columns = [
+            { width: 24 },
+            { width: 23 },
+            { width: 28 },
+            { width: 18 },
+            { width: 14 },
+            { width: 12 },
+            { width: 17 },
+            { width: 17 },
+            { width: 18 }
+        ];
+
+        styleHeader(ordersSheet);
+    }
+
+    if (summarySheet.rowCount === 0) {
+        summarySheet.addRow([
+            "Order ID",
+            "Date & Time",
+            "Items Count",
+            "Grand Total (₹)"
+        ]);
+
+        summarySheet.columns = [
+            { width: 25 },
+            { width: 23 },
+            { width: 16 },
+            { width: 20 }
+        ];
+
+        styleHeader(summarySheet);
+    }
+
+    return { workbook, ordersSheet, summarySheet };
+}
+
+// ---------- HOME ROUTE ----------
+app.get("/", (req, res) => {
+    res.send("KiranaShop Backend is Running! 🛒");
+});
+
+// ---------- HEALTH CHECK ----------
+app.get("/api/health", (req, res) => {
+    res.json({
+        success: true,
+        server: "Running",
+        platform: "Render",
+        excelFile: EXCEL_FILE,
+        excelExists: fs.existsSync(EXCEL_FILE),
+        storage: process.env.DATA_DIR ? "Configured DATA_DIR" : "Temporary local storage"
+    });
+});
+
+// ---------- SAVE ORDER ----------
 app.post("/api/order", async (req, res) => {
     try {
         const order = req.body;
@@ -167,8 +213,15 @@ app.post("/api/order", async (req, res) => {
             });
         }
 
+        if (order.items.length > 100) {
+            return res.status(400).json({
+                success: false,
+                error: "Too many order items"
+            });
+        }
+
         const orderId = order.orderId || `ORD-${Date.now()}`;
-        const orderDate = order.date || new Date().toLocaleString("en-IN");
+        const orderDate = new Date().toLocaleString("en-IN");
 
         const items = order.items.map(item => {
             const quantity = Number(item.quantity);
@@ -181,24 +234,24 @@ app.post("/api/order", async (req, res) => {
                 quantity <= 0 ||
                 price < 0
             ) {
-                throw new Error("Invalid product or quantity/price");
+                throw new Error("Invalid product, quantity or price");
             }
 
             return {
-                name: item.name,
-                category: item.category || "",
-                unit: item.unit || "",
+                name: String(item.name),
+                category: String(item.category || ""),
+                unit: String(item.unit || ""),
                 quantity,
                 price,
-                total: Number.isFinite(Number(item.total))
-                    ? Number(item.total)
-                    : quantity * price
+                total: quantity * price
             };
         });
 
-        const grandTotal = Number.isFinite(Number(order.grandTotal))
-            ? Number(order.grandTotal)
-            : items.reduce((sum, item) => sum + item.total, 0);
+        // Calculate total on backend
+        const grandTotal = items.reduce(
+            (sum, item) => sum + item.total,
+            0
+        );
 
         await queueSave(async () => {
             const {
@@ -220,10 +273,10 @@ app.post("/api/order", async (req, res) => {
             });
 
             if (duplicate) {
-                throw new Error(`Duplicate order ID: ${orderId}`);
+                throw new Error("Duplicate order ID");
             }
 
-            // Add every product to Orders sheet
+            // Save product details
             for (const item of items) {
                 const row = ordersSheet.addRow([
                     orderId,
@@ -262,7 +315,7 @@ app.post("/api/order", async (req, res) => {
                 }
             }
 
-            // Add one entry per order to Summary sheet
+            // Save order summary
             summarySheet.addRow([
                 orderId,
                 orderDate,
@@ -270,22 +323,21 @@ app.post("/api/order", async (req, res) => {
                 grandTotal
             ]);
 
-            // Save Excel file
             await saveWorkbook(workbook);
 
-            console.log("✅ Order saved:", orderId);
-            console.log("📁 Excel file:", EXCEL_FILE);
+            console.log("Order saved:", orderId);
+            console.log("Excel file:", EXCEL_FILE);
         });
 
-        res.json({
+        res.status(201).json({
             success: true,
             message: "Order saved successfully!",
             orderId,
-            file: EXCEL_FILE
+            grandTotal
         });
 
     } catch (error) {
-        console.error("❌ Error saving order:", error);
+        console.error("Order Error:", error);
 
         res.status(500).json({
             success: false,
@@ -294,11 +346,7 @@ app.post("/api/order", async (req, res) => {
     }
 });
 
-// ==============================
-// GET /api/orders
-// Get all orders
-// ==============================
-
+// ---------- GET ALL ORDERS ----------
 app.get("/api/orders", async (req, res) => {
     try {
         await saveQueue;
@@ -307,7 +355,11 @@ app.get("/api/orders", async (req, res) => {
             !fs.existsSync(EXCEL_FILE) ||
             fs.statSync(EXCEL_FILE).size === 0
         ) {
-            return res.json({ success: true, orders: [] });
+            return res.json({
+                success: true,
+                totalOrders: 0,
+                orders: []
+            });
         }
 
         const workbook = new ExcelJS.Workbook();
@@ -316,7 +368,11 @@ app.get("/api/orders", async (req, res) => {
         const sheet = workbook.getWorksheet("Summary");
 
         if (!sheet) {
-            return res.json({ success: true, orders: [] });
+            return res.json({
+                success: true,
+                totalOrders: 0,
+                orders: []
+            });
         }
 
         const orders = [];
@@ -339,7 +395,7 @@ app.get("/api/orders", async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Error reading orders:", error);
+        console.error("Read Orders Error:", error);
 
         res.status(500).json({
             success: false,
@@ -348,11 +404,7 @@ app.get("/api/orders", async (req, res) => {
     }
 });
 
-// ==============================
-// GET /api/products
-// Product list
-// ==============================
-
+// ---------- PRODUCTS API ----------
 app.get("/api/products", (req, res) => {
     const products = [
         { id: 1, name: "Basmati Rice", category: "grains", price: 85, unit: "1 kg", stock: 50 },
@@ -387,31 +439,34 @@ app.get("/api/products", (req, res) => {
         { id: 30, name: "Toilet Cleaner", category: "cleaning", price: 65, unit: "500 ml", stock: 12 }
     ];
 
-    res.json({ success: true, products });
-});
-
-// ==============================
-// GET /api/health
-// Check backend and Excel file
-// ==============================
-
-app.get("/api/health", (req, res) => {
     res.json({
         success: true,
-        server: "Running",
-        excelFile: EXCEL_FILE,
-        excelExists: fs.existsSync(EXCEL_FILE)
+        products
     });
 });
 
-// ==============================
-// Start Server
-// ==============================
+// ---------- 404 HANDLER ----------
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: "API route not found"
+    });
+});
 
-app.listen(PORT, () => {
-    console.log("\n🛒 KiranaShop Backend Started!");
-    console.log(`🌐 Website: http://localhost:${PORT}`);
-    console.log(`📊 Orders: http://localhost:${PORT}/api/orders`);
-    console.log(`📁 Excel file: ${EXCEL_FILE}`);
-    console.log(`❤️ Health: http://localhost:${PORT}/api/health\n`);
+// ---------- ERROR HANDLER ----------
+app.use((err, req, res, next) => {
+    console.error("Server Error:", err.message);
+
+    res.status(500).json({
+        success: false,
+        error: err.message
+    });
+});
+
+// ---------- START SERVER ----------
+app.listen(PORT, "0.0.0.0", () => {
+    console.log("KiranaShop Backend Started!");
+    console.log(`Port: ${PORT}`);
+    console.log(`Excel: ${EXCEL_FILE}`);
+    console.log(`Health: http://localhost:${PORT}/api/health`);
 });
