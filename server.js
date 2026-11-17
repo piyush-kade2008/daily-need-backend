@@ -462,6 +462,9 @@ app.use((err, req, res, next) => {
         error: err.message
     });
 });
+app.get("/", (req, res) => {
+    res.send("Daily Need Backend is Running Successfully!");
+});
 
 // ---------- START SERVER ----------
 app.listen(PORT, "0.0.0.0", () => {
